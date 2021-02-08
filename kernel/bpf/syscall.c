@@ -1016,6 +1016,7 @@ static int map_lookup_elem(union bpf_attr *attr)
 	if (CHECK_ATTR(BPF_MAP_LOOKUP_ELEM))
 		return -EINVAL;
 
+	// BPF_F_LOCK is only permitted flag for this cmd.
 	if (attr->flags & ~BPF_F_LOCK)
 		return -EINVAL;
 
@@ -1028,12 +1029,14 @@ static int map_lookup_elem(union bpf_attr *attr)
 		goto err_put;
 	}
 
+	// user argues BPF_F_LOCK but underlying map doesn't support lock, return.
 	if ((attr->flags & BPF_F_LOCK) &&
 	    !map_value_has_spin_lock(map)) {
 		err = -EINVAL;
 		goto err_put;
 	}
 
+	// dump key from user space to kernel space
 	key = __bpf_copy_key(ukey, map->key_size);
 	if (IS_ERR(key)) {
 		err = PTR_ERR(key);
@@ -1042,15 +1045,19 @@ static int map_lookup_elem(union bpf_attr *attr)
 
 	value_size = bpf_map_value_size(map);
 
+	// Why not a local variable? may be unfixed size.
+	// Could alloca happens in kernel stack?
 	err = -ENOMEM;
 	value = kmalloc(value_size, GFP_USER | __GFP_NOWARN);
 	if (!value)
 		goto free_key;
 
+	// dump elem's value
 	err = bpf_map_copy_value(map, key, value, attr->flags);
 	if (err)
 		goto free_value;
 
+	// copy to user space
 	err = -EFAULT;
 	if (copy_to_user(uvalue, value, value_size) != 0)
 		goto free_value;
@@ -4342,9 +4349,13 @@ SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, siz
 	union bpf_attr attr;
 	int err;
 
+	// If sysctl kernel.unprivileged_bpf_disabled=1 and user has no BPF_CAP/BPF_SYS_ADMIN, return.
 	if (sysctl_unprivileged_bpf_disabled && !bpf_capable())
 		return -EPERM;
 
+	// As for user prog and kernel has independent version updates,
+	// two bpf_attr in user space and kernel may differ in size.
+	// We access only min portion at head and fill zeros at tail.
 	err = bpf_check_uarg_tail_zero(uattr, sizeof(attr), size);
 	if (err)
 		return err;
@@ -4364,6 +4375,14 @@ SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, siz
 		err = map_create(&attr);
 		break;
 	case BPF_MAP_LOOKUP_ELEM:
+		// Read elem's value back to user space pointed by attr.value,
+		// if the elem specified by attr.key exists in map.
+		// How about data race?
+		// case 1: For an existed elem, one thread reads and another thread writes.
+		// case 2: For an existed elem, one thread reads and another deletes.
+		// case 3: For an non-existed ele, one thread adds and anoter reads.
+		// For some particular type map, BPF_F_LOCK in attr.flags solves case 1.
+		// There is no answer to solve case 2 and case 3.
 		err = map_lookup_elem(&attr);
 		break;
 	case BPF_MAP_UPDATE_ELEM:
