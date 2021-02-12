@@ -623,6 +623,8 @@ errout:
 	return -ENOMEM;
 }
 
+// Construct a bpf_program object for EVERY function in exe sections.
+// A section could consist of 1+ functions.
 static int
 bpf_object__add_programs(struct bpf_object *obj, Elf_Data *sec_data,
 			 const char *sec_name, int sec_idx)
@@ -639,6 +641,7 @@ bpf_object__add_programs(struct bpf_object *obj, Elf_Data *sec_data,
 	sec_off = 0;
 
 	while (sec_off < sec_sz) {
+		// View function as a symbol also.
 		if (elf_sym_by_sec_off(obj, sec_idx, sec_off, STT_FUNC, &sym)) {
 			pr_warn("sec '%s': failed to find program symbol at offset %zu\n",
 				sec_name, sec_off);
@@ -647,6 +650,7 @@ bpf_object__add_programs(struct bpf_object *obj, Elf_Data *sec_data,
 
 		prog_sz = sym.st_size;
 
+        // function name
 		name = elf_sym_str(obj, sym.st_name);
 		if (!name) {
 			pr_warn("sec '%s': failed to get symbol name for offset %zu\n",
@@ -663,6 +667,7 @@ bpf_object__add_programs(struct bpf_object *obj, Elf_Data *sec_data,
 		pr_debug("sec '%s': found program '%s' at insn offset %zu (%zu bytes), code size %zu insns (%zu bytes)\n",
 			 sec_name, name, sec_off / BPF_INSN_SZ, sec_off, prog_sz / BPF_INSN_SZ, prog_sz);
 
+        // Append one bpf_program slot
 		progs = libbpf_reallocarray(progs, nr_progs + 1, sizeof(*progs));
 		if (!progs) {
 			/*
@@ -678,6 +683,7 @@ bpf_object__add_programs(struct bpf_object *obj, Elf_Data *sec_data,
 
 		prog = &progs[nr_progs];
 
+        // Copy instructions from section to bpf_program
 		err = bpf_object__init_prog(obj, prog, name, sec_idx, sec_name,
 					    sec_off, data + sec_off, prog_sz);
 		if (err)
@@ -1374,6 +1380,9 @@ static char *internal_map_name(struct bpf_object *obj,
 	return strdup(map_name);
 }
 
+// mmap a block of memory for .data .rodata .bss
+// share with userspace and kernl ebpf prog.
+// map->mapped is address of shared memory.
 static int
 bpf_object__init_internal_map(struct bpf_object *obj, enum libbpf_map_type type,
 			      int sec_idx, void *data, size_t data_sz)
@@ -1425,6 +1434,9 @@ bpf_object__init_internal_map(struct bpf_object *obj, enum libbpf_map_type type,
 	return 0;
 }
 
+
+// memory for .data .rodata and .bss
+// one element array map
 static int bpf_object__init_global_data_maps(struct bpf_object *obj)
 {
 	int err;
@@ -1761,6 +1773,7 @@ static int bpf_object__init_kconfig_map(struct bpf_object *obj)
 	return 0;
 }
 
+// Legacy maps section, feel free to skip.
 static int bpf_object__init_user_maps(struct bpf_object *obj, bool strict)
 {
 	Elf_Data *symbols = obj->efile.symbols;
@@ -1768,7 +1781,7 @@ static int bpf_object__init_user_maps(struct bpf_object *obj, bool strict)
 	Elf_Data *data = NULL;
 	Elf_Scn *scn;
 
-	if (obj->efile.maps_shndx < 0)
+	if (obj->efile.maps_shndx < 0) // maps section, not .maps
 		return 0;
 
 	if (!symbols)
@@ -2306,9 +2319,10 @@ static int bpf_object__init_user_btf_maps(struct bpf_object *obj, bool strict,
 	Elf_Data *data;
 	Elf_Scn *scn;
 
-	if (obj->efile.btf_maps_shndx < 0)
+	if (obj->efile.btf_maps_shndx < 0)// .maps section, not maps.
 		return 0;
 
+    // .maps section and its's metadata
 	scn = elf_sec_by_idx(obj, obj->efile.btf_maps_shndx);
 	data = elf_sec_data(obj, scn);
 	if (!scn || !data) {
@@ -2317,6 +2331,7 @@ static int bpf_object__init_user_btf_maps(struct bpf_object *obj, bool strict,
 		return -EINVAL;
 	}
 
+    // Get obj->efile.btf_maps_sec_btf_id from .BTF section
 	nr_types = btf__get_nr_types(obj->btf);
 	for (i = 1; i <= nr_types; i++) {
 		t = btf__type_by_id(obj->btf, i);
@@ -2330,6 +2345,7 @@ static int bpf_object__init_user_btf_maps(struct bpf_object *obj, bool strict,
 		}
 	}
 
+    // no btf type for .maps section
 	if (!sec) {
 		pr_warn("DATASEC '%s' not found.\n", MAPS_ELF_SEC);
 		return -ENOENT;
@@ -2358,11 +2374,11 @@ static int bpf_object__init_maps(struct bpf_object *obj,
 	strict = !OPTS_GET(opts, relaxed_maps, false);
 	pin_root_path = OPTS_GET(opts, pin_root_path, NULL);
 
-	err = bpf_object__init_user_maps(obj, strict);
-	err = err ?: bpf_object__init_user_btf_maps(obj, strict, pin_root_path);
-	err = err ?: bpf_object__init_global_data_maps(obj);
+	err = bpf_object__init_user_maps(obj, strict); // maps section
+	err = err ?: bpf_object__init_user_btf_maps(obj, strict, pin_root_path); // .maps section
+	err = err ?: bpf_object__init_global_data_maps(obj); // .data .rodata .bss section
 	err = err ?: bpf_object__init_kconfig_map(obj);
-	err = err ?: bpf_object__init_struct_ops_maps(obj);
+	err = err ?: bpf_object__init_struct_ops_maps(obj); // .struct_ops section
 	if (err)
 		return err;
 
@@ -2822,6 +2838,8 @@ static int cmp_progs(const void *_a, const void *_b)
 	return a->sec_insn_off < b->sec_insn_off ? -1 : 1;
 }
 
+// Collect intended ELF sections such as .symtab .data .rodata .maps .BTF .BTF.ext .rel.* and prog related custom section.
+// Reorgnize pure ELF section from obj->efile.elf to obj.efile.* members
 static int bpf_object__elf_collect(struct bpf_object *obj)
 {
 	Elf *elf = obj->efile.elf;
@@ -2836,6 +2854,7 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 	/* a bunch of ELF parsing functionality depends on processing symbols,
 	 * so do the first pass and find the symbol table
 	 */
+	// obj->efile-symbols
 	scn = NULL;
 	while ((scn = elf_nextscn(elf, scn)) != NULL) {
 		if (elf_sec_hdr(obj, scn, &sh))
@@ -2857,6 +2876,7 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 		}
 	}
 
+    // Walk through all ELF sections
 	scn = NULL;
 	while ((scn = elf_nextscn(elf, scn)) != NULL) {
 		idx++;
@@ -2864,6 +2884,7 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 		if (elf_sec_hdr(obj, scn, &sh))
 			return -LIBBPF_ERRNO__FORMAT;
 
+        // section name
 		name = elf_sec_str(obj, sh.sh_name);
 		if (!name)
 			return -LIBBPF_ERRNO__FORMAT;
@@ -2871,6 +2892,7 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 		if (ignore_elf_section(&sh, name))
 			continue;
 
+        // section metadata
 		data = elf_sec_data(obj, scn);
 		if (!data)
 			return -LIBBPF_ERRNO__FORMAT;
@@ -2880,38 +2902,51 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 			 (int)sh.sh_link, (unsigned long)sh.sh_flags,
 			 (int)sh.sh_type);
 
+        // SEC(".license")
 		if (strcmp(name, "license") == 0) {
 			err = bpf_object__init_license(obj, data->d_buf, data->d_size);
 			if (err)
 				return err;
 		} else if (strcmp(name, "version") == 0) {
+			// SEC(".version")
 			err = bpf_object__init_kversion(obj, data->d_buf, data->d_size);
 			if (err)
 				return err;
 		} else if (strcmp(name, "maps") == 0) {
+			// diffrent from next one?
 			obj->efile.maps_shndx = idx;
 		} else if (strcmp(name, MAPS_ELF_SEC) == 0) {
+			// SEC(".maps")
 			obj->efile.btf_maps_shndx = idx;
 		} else if (strcmp(name, BTF_ELF_SEC) == 0) {
+			// .BTF
 			btf_data = data;
 		} else if (strcmp(name, BTF_EXT_ELF_SEC) == 0) {
+			// .BTF.ext
 			btf_ext_data = data;
 		} else if (sh.sh_type == SHT_SYMTAB) {
+			// .symtab
 			/* already processed during the first pass above */
 		} else if (sh.sh_type == SHT_PROGBITS && data->d_size > 0) {
 			if (sh.sh_flags & SHF_EXECINSTR) {
+				// .text
 				if (strcmp(name, ".text") == 0)
 					obj->efile.text_shndx = idx;
+
+				// prog related custom section
 				err = bpf_object__add_programs(obj, data, name, idx);
 				if (err)
 					return err;
 			} else if (strcmp(name, DATA_SEC) == 0) {
+				// .data
 				obj->efile.data = data;
 				obj->efile.data_shndx = idx;
 			} else if (strcmp(name, RODATA_SEC) == 0) {
+				// .rodata
 				obj->efile.rodata = data;
 				obj->efile.rodata_shndx = idx;
 			} else if (strcmp(name, STRUCT_OPS_SEC) == 0) {
+				// .struct_ops
 				obj->efile.st_ops_data = data;
 				obj->efile.st_ops_shndx = idx;
 			} else {
@@ -2919,10 +2954,15 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 					idx, name);
 			}
 		} else if (sh.sh_type == SHT_REL) {
+			// .rel.*
+			// There could be multiple .rel section.
 			int nr_sects = obj->efile.nr_reloc_sects;
 			void *sects = obj->efile.reloc_sects;
+
+			// Which section this .rel describes
 			int sec = sh.sh_info; /* points to other section */
 
+            // We care about exe sections, .map and .struct_ops section.
 			/* Only do relo for section with exec instructions */
 			if (!section_have_execinstr(obj, sec) &&
 			    strcmp(name, ".rel" STRUCT_OPS_SEC) &&
@@ -2944,6 +2984,7 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 			obj->efile.reloc_sects[nr_sects].shdr = sh;
 			obj->efile.reloc_sects[nr_sects].data = data;
 		} else if (sh.sh_type == SHT_NOBITS && strcmp(name, BSS_SEC) == 0) {
+			// .bss
 			obj->efile.bss = data;
 			obj->efile.bss_shndx = idx;
 		} else {
@@ -2952,6 +2993,8 @@ static int bpf_object__elf_collect(struct bpf_object *obj)
 		}
 	}
 
+    // .strtab section is collected before.
+	// Check its section idx validation here.
 	if (!obj->efile.strtabidx || obj->efile.strtabidx > idx) {
 		pr_warn("elf: symbol strings section missing or invalid in %s\n", obj->path);
 		return -LIBBPF_ERRNO__FORMAT;
@@ -3106,6 +3149,7 @@ static int find_int_btf_id(const struct btf *btf)
 	return 0;
 }
 
+// Convert symtab symbol entrys into obj->externs, bind btf info
 static int bpf_object__collect_externs(struct bpf_object *obj)
 {
 	struct btf_type *sec, *kcfg_sec = NULL, *ksym_sec = NULL;
@@ -3370,12 +3414,16 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 
 	reloc_desc->processed = false;
 
+    // call user sub function. not kernel provided helper functions.
 	/* sub-program call relocation */
 	if (insn->code == (BPF_JMP | BPF_CALL)) {
+		// target function address is relative to curent pc: pc + insn->imm. so reloc amends ->imm when loading prog.
 		if (insn->src_reg != BPF_PSEUDO_CALL) {
 			pr_warn("prog '%s': incorrect bpf_call opcode\n", prog->name);
 			return -LIBBPF_ERRNO__RELOC;
 		}
+
+		// user sub function should be static and in .text section usually.
 		/* text_shndx can be 0, if no default "main" program exists */
 		if (!shdr_idx || shdr_idx != obj->efile.text_shndx) {
 			sym_sec_name = elf_sec_name(obj, elf_sec_by_idx(obj, shdr_idx));
@@ -3383,6 +3431,8 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 				prog->name, sym_name, sym_sec_name);
 			return -LIBBPF_ERRNO__RELOC;
 		}
+
+		// target function addr shouldn't be at mid of instruction.
 		if (sym->st_value % BPF_INSN_SZ) {
 			pr_warn("prog '%s': bad call relo against '%s' at offset %zu\n",
 				prog->name, sym_name, (size_t)sym->st_value);
@@ -3394,12 +3444,14 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 		return 0;
 	}
 
+    // set dst_reg with double word imm.
 	if (insn->code != (BPF_LD | BPF_IMM | BPF_DW)) {
 		pr_warn("prog '%s': invalid relo against '%s' for insns[%d].code 0x%x\n",
 			prog->name, sym_name, insn_idx, insn->code);
 		return -LIBBPF_ERRNO__RELOC;
 	}
 
+    // reloc for extern symbol.
 	if (sym_is_extern(sym)) {
 		int sym_idx = GELF_R_SYM(rel->r_info);
 		int i, n = obj->nr_extern;
@@ -3423,6 +3475,7 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 		return 0;
 	}
 
+    // check reloc target symbol section
 	if (!shdr_idx || shdr_idx >= SHN_LORESERVE) {
 		pr_warn("prog '%s': invalid relo against '%s' in special section 0x%x; forgot to initialize global var?..\n",
 			prog->name, sym_name, shdr_idx);
@@ -3432,6 +3485,7 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 	type = bpf_object__section_to_libbpf_map_type(obj, shdr_idx);
 	sym_sec_name = elf_sec_name(obj, elf_sec_by_idx(obj, shdr_idx));
 
+    // reloc target symbol is .data .rodata .bss .maps
 	/* generic map reference relocation */
 	if (type == LIBBPF_MAP_UNSPEC) {
 		if (!bpf_object__shndx_is_maps(obj, shdr_idx)) {
@@ -3544,23 +3598,32 @@ bpf_object__collect_prog_relos(struct bpf_object *obj, GElf_Shdr *shdr, Elf_Data
 		 relo_sec_name, sec_idx, sec_name);
 	nrels = shdr->sh_size / shdr->sh_entsize;
 
+    // Walk through all reloc entrys in this .rel.* section
 	for (i = 0; i < nrels; i++) {
 		if (!gelf_getrel(data, i, &rel)) {
 			pr_warn("sec '%s': failed to get relo #%d\n", relo_sec_name, i);
 			return -LIBBPF_ERRNO__FORMAT;
 		}
+
+		// reloc refer which symbol?
 		if (!gelf_getsym(symbols, GELF_R_SYM(rel.r_info), &sym)) {
 			pr_warn("sec '%s': symbol 0x%zx not found for relo #%d\n",
 				relo_sec_name, (size_t)GELF_R_SYM(rel.r_info), i);
 			return -LIBBPF_ERRNO__FORMAT;
 		}
+
+		// reloc offset shouldn't be at mid of instruction.
 		if (rel.r_offset % BPF_INSN_SZ) {
 			pr_warn("sec '%s': invalid offset 0x%zx for relo #%d\n",
 				relo_sec_name, (size_t)GELF_R_SYM(rel.r_info), i);
 			return -LIBBPF_ERRNO__FORMAT;
 		}
 
+        // instruction idx in section
 		insn_idx = rel.r_offset / BPF_INSN_SZ;
+
+	    // Name of reloc target symbol, may be a section in case of static function
+
 		/* relocations against static functions are recorded as
 		 * relocations against the section that contains a function;
 		 * in such case, symbol will be STT_SECTION and sym.st_name
@@ -3576,6 +3639,7 @@ bpf_object__collect_prog_relos(struct bpf_object *obj, GElf_Shdr *shdr, Elf_Data
 		pr_debug("sec '%s': relo #%d: insn #%u against '%s'\n",
 			 relo_sec_name, i, insn_idx, sym_name);
 
+        // The prog of reloc instruction.
 		prog = find_prog_by_sec_insn(obj, sec_idx, insn_idx);
 		if (!prog) {
 			pr_warn("sec '%s': relo #%d: program not found in section '%s' for insn #%u\n",
@@ -3583,6 +3647,7 @@ bpf_object__collect_prog_relos(struct bpf_object *obj, GElf_Shdr *shdr, Elf_Data
 			return -LIBBPF_ERRNO__RELOC;
 		}
 
+        // append reloc_desc to prog
 		relos = libbpf_reallocarray(prog->reloc_desc,
 					    prog->nr_reloc + 1, sizeof(*relos));
 		if (!relos)
@@ -3591,6 +3656,8 @@ bpf_object__collect_prog_relos(struct bpf_object *obj, GElf_Shdr *shdr, Elf_Data
 
 		/* adjust insn_idx to local BPF program frame of reference */
 		insn_idx -= prog->sec_insn_off;
+
+		// fill reloc_desc
 		err = bpf_program__record_reloc(prog, &relos[prog->nr_reloc],
 						insn_idx, sym_name, &sym, &rel);
 		if (err)
@@ -6747,9 +6814,12 @@ static int bpf_object__collect_relos(struct bpf_object *obj)
 {
 	int i, err;
 
+    // Walk through all .rel.* section
 	for (i = 0; i < obj->efile.nr_reloc_sects; i++) {
 		GElf_Shdr *shdr = &obj->efile.reloc_sects[i].shdr;
 		Elf_Data *data = obj->efile.reloc_sects[i].data;
+
+		// Which section reloc describes.
 		int idx = shdr->sh_info;
 
 		if (shdr->sh_type != SHT_REL) {
@@ -6758,15 +6828,19 @@ static int bpf_object__collect_relos(struct bpf_object *obj)
 		}
 
 		if (idx == obj->efile.st_ops_shndx)
+		    // relocs for .struct_ops section
 			err = bpf_object__collect_st_ops_relos(obj, shdr, data);
 		else if (idx == obj->efile.btf_maps_shndx)
+			// relocs for .maps section
 			err = bpf_object__collect_map_relos(obj, shdr, data);
 		else
+		    // relocs for prog related custom sections.
 			err = bpf_object__collect_prog_relos(obj, shdr, data);
 		if (err)
 			return err;
 	}
 
+    // p->reloc_desc is the relos of the prog p, sort it by instruction index.
 	for (i = 0; i < obj->nr_programs; i++) {
 		struct bpf_program *p = &obj->programs[i];
 		
@@ -7137,6 +7211,7 @@ __bpf_object__open(const char *path, const void *obj_buf, size_t obj_buf_sz,
 		goto out;
 	bpf_object__elf_finish(obj);
 
+    // prog's section name indicates prog type and attach type
 	bpf_object__for_each_program(prog, obj) {
 		prog->sec_def = find_sec_def(prog->sec_name);
 		if (!prog->sec_def) {
